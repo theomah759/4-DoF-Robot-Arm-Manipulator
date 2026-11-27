@@ -1,0 +1,385 @@
+classdef ImageProcessor < handle
+    properties
+        camera;  % The Camera object for this image processor
+        staticMask;
+
+    end
+
+    methods
+        % @@@@@@
+        % README: nvargs
+        % @@@@@@
+        % Throughout this file and the new functions in Robot.m, you will
+        % see "nvargs" a lot. This stands for Name Value ARGuments. These
+        % are much like kwargs in Python.
+
+        % To pass a name-value argument to a function, run
+        % function_name(position_arg1, position_arg2, name=value). Position
+        % arguments (like all the arguments you've used so far in this
+        % course) always go before name value args.
+
+        % Name value arguments should always have a default value. This is
+        % defined in the "arguments" field. If you don't pass a certain
+        % name value argument to a function, it gets set as the default
+        % value.
+
+        % You can access the value of a name value argument via
+        % "nvargs.argument_name"
+
+        % Initializing
+        function self = ImageProcessor(nvargs)
+            arguments
+                nvargs.debug logical = false;
+                nvargs.camera = []; % added this to fix calibration loop
+                nvargs.forceRecalibrate logical = false;
+            end
+
+            %Added this to fix calibration loop
+            if isempty(nvargs.camera)
+                % Only create camera object if it doesn't exist
+                self.camera = Camera();
+            else
+                % Use the existing camera object
+                self.camera = nvargs.camera;
+            end
+        end
+            
+
+        function mask = generate_static_mask(self, nvargs)
+            arguments
+                self ImageProcessor;
+                nvargs.margin double = 20.0; % TODO: choose a default
+                nvargs.debug logical = true;
+            end
+            %GENERATE_STATIC_MASK produces a binary mask that leaves only
+            %the checkerboard and surrounding area visible
+            % Inputs:
+            %   margin (optional): a number (what units?) indicating how
+            %                      far from the edge of the checkerboard
+            %                      to keep in the mask
+            % Outputs:
+            %   mask: a binary mask that blacks out everything except a
+            %         region of interest around the checkerboard
+
+            % If self.debug == true, this function should capture a
+            % picture, apply the mask, and display it
+
+            % Note: poly2mask is a very helpful tool for this part
+            % https://www.mathworks.com/help/images/ref/poly2mask.html
+
+            % Note2: Camera.m offers a method for finding checkerboard
+            % points. This includes the corners, which may be helpful...
+
+            currImg = self.camera.getImage(); % Take a picture
+            grayScaleImg = rgb2gray(currImg); % Picture in workspace is grayscaled
+            binaryImg = imbinarize(grayScaleImg); % Same picture is black & white
+
+            [imagePoints, boardSize] = detectCheckerboardPoints(currImg, 'PartialDetections',false);
+            if isempty(imagePoints) % Checks if an array is empty
+                error("Checkerboard was not detected")
+            end
+
+            % Plotting The Result of Detect Checkerboard Points
+            figure;
+            imshow(currImg);
+            hold on;
+            title("Checkerboard Detected Points")
+            plot(imagePoints(:,1), imagePoints(:,2), 'r*', 'MarkerSize', 10);
+            hold off;
+
+            % X and Y referance points TOP LEFT (label 18)
+            calibPointX = imagePoints(1,1); %442.8831 
+            calibPointY = imagePoints(1,2); %358.6345
+
+
+            % x = 422.8831  360.0000  894.9649  853.7728
+            x = [imagePoints(1,1)-nvargs.margin ,imagePoints(4,1)-nvargs.margin, imagePoints(40,1)+nvargs.margin, imagePoints(37,1)+nvargs.margin];
+
+            % y = 338.6345  476.0000  472.0015  342.0594
+            y = [imagePoints(1,2)-nvargs.margin,imagePoints(4,2)+nvargs.margin, imagePoints(40,2)+nvargs.margin, imagePoints(37,2)-nvargs.margin];
+
+            % Applying the mask to isolate the checkerboard
+            mask = poly2mask(x, y, size(binaryImg, 1), size(binaryImg, 2));
+            castedImg = bsxfun(@times, currImg,cast(mask,'like',currImg));
+            imshow(castedImg);
+
+
+            figure;
+            title('Static Checkerboard Mask');
+            imshow(mask);
+
+        end
+
+        function dynamicMask = generate_dynamic_mask(self,nvargs)
+            arguments
+                self ImageProcessor;
+                nvargs.margin double = 20.0
+                nvargs.debug = false;
+            end
+            % Takes a picture
+            currImg = self.camera.getImage();
+
+            % Color mask for each color of the 3D printed sphere
+            [binaryYellow, maskedYellow] = createMaskYellow(currImg);
+            [binaryGreen, maskedGreen] = createMaskGreen(currImg);
+            [binaryGrey, maskedOrange] = createMaskOrange(currImg);
+            [binaryRed, maskedRed] = createMaskRed(currImg);
+            
+            if debug = true;
+            % Displays each color mask for verification
+            figure, imshow(binaryYellow), title('Yellow Mask');
+            figure, imshow(binaryGreen), title('Green Mask');
+            figure, imshow(binaryGrey), title('Grey Mask');
+            figure, imshow(binaryRed), title('Red Mask');
+
+            % Combining all color masks for when all spheres are on the
+            % checker board using logical OR
+            combinedMask = binaryYellow | binaryGreen | binaryGrey | binaryRed;
+
+            % Apply the mask to the image to keep only the colored regions
+            dynamic_mask = bsxfun(@times, currImg, cast(combinedMask, 'like', currImg));
+
+            % Display combined colormask for verification
+            if any(combinedMask(:))
+                figure, imshow(dynamic_mask), title('Dynamic Color Mask');
+            else
+                disp('No color regions detected.');
+                dynamic_mask = []; % Assign empty array to avoid any issues
+
+            end
+
+        end
+
+        function p_robot = image_to_robot(self, uvpos)
+            %IMAGE_TO_ROBOT transforms a point on the image to the
+            %corresponding point in the frame of the robot
+            % Inputs:
+            %   uvpos: a [1x2] matrix representing an image (u, v)
+            %          coordinate
+            % Outputs:
+            %   p_robot: a [1x2] matrix representing the transformation of
+            %            the input uvpos into the robot's base frame
+
+            % Get the camera pose (extrinsic parameters)
+            [camPose] = self.camera.getCameraPose();
+
+            % rotation and translation from the pose matrix
+            R = camPose(1:3, 1:3); 
+            T = camPose(1:3, 4)';  
+
+            % rigid3d object
+            tform = rigid3d(R, T);
+
+
+            % Image coordinates to world coordinates
+            world_coords = pointsToWorld(self.camera.getCameraInstrinsics(), tform, uvpos);
+
+            % Convert to homogeneous coordinates 
+            % (world_coords are x,y position on checkerboard (mm))
+            homogenousCoordConverter = [world_coords(1); world_coords(2); 0; 1];
+
+            % Transformation from checkerboard frame to robot base frame (might need to change this)
+            checkerboardOriginPosX = 115; % in robot frame mm offset in x-direction 
+            checkerboardOriginPosY = -90;  % in robot frame mm offset in y-direction
+            checkerboardOriginPosZ = 0;  % in robot frame mm offset in z-direction
+
+            %Transforms checkerboard/world frame to robot frame
+            %Robot X = Checkerboard/World Y
+            %Robot Y = Checkerboard/World X
+            %Robot Z = -Checkerboard/World Z
+            transformWorldToRobot = [0, 1, 0, checkerboardOriginPosX; 
+                         1, 0, 0, checkerboardOriginPosY;
+                         0, 0, -1, checkerboardOriginPosZ;
+                         0, 0, 0, 1];
+    
+            % Convert image point to a point in the robot frame
+            homogenousImgPoint_robot = inv(transformWorldToRobot) * homogenousCoordConverter;
+            p_robot = homogenousImgPoint_robot(1:2)';  % Extract (x, y) coordinates then transpose
+
+            % Display the Image to World Conversion Points
+            fprintf('Pixel (%d, %d) -> Robot Base (%.2f, %.2f)\n', ...
+                uvpos(1), uvpos(2), p_robot(1), p_robot(2));
+        end
+
+        function uv_centroids = detect_centroids(self, image, nvargs)
+            arguments
+                self ImageProcessor;
+                image (:, :, :) {mustBeNumeric}; % Input must be an img
+                nvargs.min_size int32 = 50;  % chooose a value
+            end
+            %DETECT_CENTROIDS detects the centroids of binary blobs of
+            %large enough size
+            % Iputs:
+            %   Image: an image of the environment that has already been
+            %          masked for the environment and to isolate a single
+            %          color
+            %   min_size (optional): the minimum size of a blob to consider
+            %                        a ball
+            % Outputs:
+            %   colors: a [1xn] matrix of strings indicating the color of
+            %           the ball at each detected centroid
+            %   uv_centroids: a [nx2] matrix of coordinates of valid
+            %                 centroids in image coordinates
+
+            % If self.debug == true, this function should display the image
+            % that was passed to it with colored circles on it marking the
+            % balls
+
+            % If self.debug == true, this function should display the image
+            % that was passed to it with each color mask applied
+            % individually (4 figures total for this part).
+
+            % YOUR CODE HERE
+
+
+            % Hint: binaryImglabel will be very helpful in this function
+            % https://www.mathworks.com/help/images/ref/binaryImglabel.html
+
+            % Hint: regionprops will also be very helpful
+            % https://www.mathworks.com/help/images/ref/regionprops.html
+
+
+            % Gray scale the RGB img input
+            if size(image, 3) == 3 % Checks for an RGB img
+                image = rgb2gray(image);
+            end
+
+            % Gray scaled img becomes black & white
+            binaryImg = imbinarize(image); % THRESHOLD ASJUSTER
+
+            % Label and Measure Connected Components in a Binary Image
+            %Pixels are connected if their edges or corners touch.
+            %Two adjoining pixels are part of the same object
+            % if they are both on and are connected along the horizontal, vertical, or diagonal direction.
+            L8Connectivity = binaryImglabel(binaryImg, 8);
+            % Measure properties of image regions --> centroids
+            calcCentroids = regionprops(L8Connectivity, 'Centroid', 'Area');
+
+            % Isolate valid centroids
+            numImgCentroids = numel(calcCentroids); % number of array elements in calculated centroids
+            validCentroids = zeros(numImgCentroids, 2); % preallocate valid centroids [n X 2]
+            centroidCounter = 0; % centroidCounterer for valid centroids
+
+            % Iterate through valid centroids and store the valid centroids
+            % that meet the minimum area size requirement
+            for i = 1:numImgCentroids
+                if calcCentroids(i).Area >= nvargs.min_size % applies minimum area filter
+                    centroidCounter = centroidCounter + 1; %increment counter
+                    validCentroids(centroidCounter, :) = calcCentroids(i).Centroid; %store centroid coordinates
+                end
+            end
+
+            % Removing unused rows due to centroids not being found
+            if centroidCounter == 0 % set an empty array if zero centroids are found
+                uv_centroids = [];
+            else % assign only the filled rows of validCentroids to uv_centroids
+                uv_centroids = validCentroids(1:centroidCounter, :);
+            end
+
+            %Display the black & white image
+            figure;
+            imshow(binaryImg);
+            hold on;
+            if ~isempty(uv_centroids) % Checks if array is (logical) NOT empty
+                % Extracts first column and second column of array
+                plot(uv_centroids(:, 1), uv_centroids(:, 2), 'b*', 'MarkerSize', 10, 'LineWidth', 2);
+            end
+            title('Detected Centroids');
+            hold off;
+
+            % Display each color mask if multiple color masks were passed
+            if iscell(image) % checks if input is a cell array
+                for i = 1:numel(image) % iterates through the total cell count
+                    figure;
+                    imshow(image{i}); %display the i-th img
+                    title(['Color Mask ', num2str(i)]); %title shows img index
+                end
+            end
+
+        end
+
+        function ts_centroids = correct_centroids(self, centroids, nvargs)
+            arguments
+                self ImageProcessor;
+                centroids double;
+                nvargs.ball_z = 10;  % TODO: Pick a good value
+            end
+            %CORRECT_CENTROIDS transforms image coordinate centroids into
+            %task-space coordinates for the ball
+            % Inputs:
+            %   centroids: a [nx2] array of centroids in image coordinates
+            %   ball_z (optional): how high the center of the ball is in
+            %                      millimeters
+            % Hint: similar triangles
+            % Hint2: imageToWorld will be helpful here
+
+            [camPose] = self.camera.getCameraPose();
+
+
+            % Rotation and translation from the camera extrinsic pose matrix
+            camRotation = camPose(1:3, 1:3); 
+            camTranslation = camPose(1:3, 4)';  
+
+            % object stores information about a 3-D rigid geometric transformation and enables forward and inverse transformations.
+            tform = rigid3d(camRotation, camTranslation);
+
+            % Image coordinates to world coordinates transformantion
+            world_coords = pointsToWorld(self.camera.getCameraInstrinsics(), tform, centroids);
+            
+            % Robot Frame Coordinates
+            r_pos = self.image_to_robot(centroids);
+            camDetectedPointDistX = 385 - r_pos(1);
+            camDirectionY = -r_pos(2); %positive Y for robot frame (inverted)
+            camHeight = 168; % mm
+            ballCenterHeight = 10; % mm
+            camRotation = sqrt(camDetectedPointDistX^2 + camDirectionY^2); % hypotenous of camera to pointsToWorld()
+            
+            % Using similar triangles (overlaping triangle) to calculate
+            % the hypotenous of the smaller triangle
+            horrizCorrectionDist = camRotation * (ballCenterHeight/camHeight);
+
+            correctedHorrizDist = camRotation - horrizCorrectionDist;
+            
+            theta = atan2d(camDirectionY,camDetectedPointDistX); % angle from camera to point on checkerboard
+            correctedX = correctedHorrizDist * cosd(theta);
+            correctedY = correctedHorrizDist * sind(theta);
+            
+            % Convert to Robot Coordinates
+            robotPointX = 385 -correctedX;
+            robotPointY = -correctedY;
+            robotPointCoords = [robotPointX, robotPointY];
+            ts_centroids = robotPointCoords;
+
+
+        end
+
+        % Write a function that acquires an image, returns the
+        % coordinates of the balls in the task space of the robot. Satisfy
+        % the following requiremetns.
+
+        function ts_coords = detect_balls(self)
+            %DETECT_BALLS finds the task space coordinates of all balls on the
+            %checkerboard
+            % Outputs:
+            %   ts_coords: the task space coordinates of all balls in the
+            %              workspace
+
+            ballsColorMask = self.dynamicMask(); % access color mask fcn
+            validCentroids = self.detect_centroids(ballsColorMask); % access detect_centroids fcn
+            ts_coords =[]; % empty task-space coordinates array
+
+            if ~isempty(validCentroids) % checks (logical) NOT empty array for validCentroids
+                % Iterate through each row of validCentroids array, which
+                % is a centroid coordinate (x,y)
+                for i = 1:size(validCentroids, 1)
+                    % Extract the i-th centroid (all columns of row i)
+                    corrected = self.correct_centroids(validCentroids(i, :));
+                    % Append new corrected coordinates
+                    ts_coords = [ts_coords; corrected];
+                end
+
+            end
+        end
+    end
+
+end

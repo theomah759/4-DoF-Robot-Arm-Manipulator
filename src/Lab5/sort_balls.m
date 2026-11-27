@@ -1,0 +1,33 @@
+% In this file, write your "main" script for picking up the balls
+% This should only be 10-15 lines long, the vast majority of the work
+% should be in your Robot and ImageProcessor classes
+
+% Ultimately it's up to you to decide how Jto organize this, but the
+% "detect_balls" and "pick_up_ball" functions should do a lot of the work
+% for you.
+
+% Initialize the robot and image processor objects
+robot = Robot(); %robot object
+pause(2)
+imgProcessor = ImageProcessor();%image processor object
+pause(8)
+fprintf("Place Balls")
+colors = {'yellow', 'green', 'orange', 'red'}; %color masks
+imgCaptured = false; %flag
+pause(10)
+
+while true
+    if imgCaptured
+        fprintf("captured image")
+        % Pick up the balls
+        for i = 1:length(spheres)
+            currColor = colors{mod(i-1, length(colors)) + 1};
+            robot.pick_up_ball([spheres(i,1), spheres(i,2)], currColor);
+        end
+        imgCaptured = false;  % Reset flag after processing to move on
+    else
+        % Detect balls and update their positions on the checkerboard
+        spheres = imgProcessor.detect_balls();
+        imgCaptured = true;  % Flag to restart loop
+    end
+end
